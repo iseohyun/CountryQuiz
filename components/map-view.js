@@ -15,6 +15,8 @@ import { CONTINENTS } from './country-data.js';
 const CONTINENT_IDS = CONTINENTS.map((c) => c.id);
 const BIG_COUNTRY_RATIO = 0.25;
 const PADDING_RATIO = 0.08;
+/** 보이는 지도 폭에 견줘 이보다 작은 나라는 퍼지는 원으로 자리를 알린다 */
+const SMALL_COUNTRY_RATIO = 0.03;
 
 /** 경로 문자열의 좌표로 만든 나라별 상자. 경로가 없는 작은 나라는 중심점 */
 const bboxCache = new Map();
@@ -84,16 +86,53 @@ export function renderWorldMap(container, country, { focusContinent, viewDomains
   const outlines = CONTINENT_IDS.filter((id) => continents[id]).map((id) => `
     <path class="map-continent${id === focusContinent ? ' focus' : ''}" d="${continents[id]}"
       ${id === focusContinent && focusColor ? `style="stroke:${focusColor}"` : ''}></path>`).join('');
-  const highlight = country ? `
-    ${country.path ? `<path class="map-country" d="${country.path}"></path>` : ''}
-    <circle class="map-ring" cx="${country.cx}" cy="${country.cy}" r="${14 * scale}"></circle>
-    <circle class="map-dot" cx="${country.cx}" cy="${country.cy}" r="${3.5 * scale}"></circle>` : '';
+  // 나라가 화면에서 너무 작으면(경로 없음, 또는 지도 폭의 SMALL_COUNTRY_RATIO 보다 작음) 그 자리에서 원이 퍼져 나가게 해 위치를 알린다
+  let highlight = '';
+  if (country) {
+    const box = getCountryBox(country);
+    const isSmall = !country.path || Math.max(box.x1 - box.x0, box.y1 - box.y0) < view.w * SMALL_COUNTRY_RATIO;
+    const ripples = isSmall ? [0, 1, 2].map((i) => `
+      <circle class="map-ripple" cx="${country.cx}" cy="${country.cy}" r="${40 * scale}" style="animation-delay:${i * 0.6}s"></circle>`).join('') + `
+      <circle class="map-dot" cx="${country.cx}" cy="${country.cy}" r="${3.5 * scale}"></circle>` : '';
+    highlight = `${country.path ? `<path class="map-country" d="${country.path}"></path>` : ''}${ripples}`;
+  }
   const id = `map-${Math.random().toString(36).slice(2, 8)}`;
   container.innerHTML = `
     <svg class="world-map" viewBox="${view.x} ${view.y} ${view.w} ${view.h}" preserveAspectRatio="xMidYMid meet"
       role="img" aria-label="세계지도" style="--map-scale:${scale}">
       <g id="${id}">${outlines}${highlight}</g>
       ${single ? `<use href="#${id}" x="${width}"></use><use href="#${id}" x="${-width}"></use>` : ''}
+    </svg>`;
+}
+
+/**
+ * 학습현황의 대륙 진도 지도: 그 대륙의 나라마다 진도 색을 칠한다. 아직 배우지 않은 나라는 옅은 회색.
+ * 경로가 없는 작은 나라는 그 자리에 같은 색 점으로 그린다.
+ * @param {HTMLElement} container
+ * @param {string} continentId
+ * @param {(country: object) => string|null} colorOf 나라의 칠할 색(없으면 배우지 않음)
+ */
+export function renderProgressMap(container, continentId, colorOf) {
+  if (!container) return;
+  const { width, continents } = WORLD_MAP;
+  const view = getContinentView(continentId);
+  const scale = view.w / width;
+  const outlines = CONTINENT_IDS.filter((id) => continents[id]).map((id) => `
+    <path class="map-continent${id === continentId ? ' focus' : ''}" d="${continents[id]}"></path>`).join('');
+  const countries = COUNTRIES.filter((c) => c.continent === continentId).map((c) => {
+    const color = colorOf(c);
+    const fill = color || '#e5e7eb';
+    const title = `<title>${c.name}</title>`;
+    return c.path
+      ? `<path class="map-progress-country${color ? ' learned' : ''}" d="${c.path}" style="fill:${fill}">${title}</path>`
+      : `<circle class="map-progress-dot${color ? ' learned' : ''}" cx="${c.cx}" cy="${c.cy}" r="${5 * scale}" style="fill:${fill}">${title}</circle>`;
+  }).join('');
+  const id = `pmap-${Math.random().toString(36).slice(2, 8)}`;
+  container.innerHTML = `
+    <svg class="world-map" viewBox="${view.x} ${view.y} ${view.w} ${view.h}" preserveAspectRatio="xMidYMid meet"
+      role="img" aria-label="대륙 진도 지도">
+      <g id="${id}">${outlines}${countries}</g>
+      <use href="#${id}" x="${width}"></use><use href="#${id}" x="${-width}"></use>
     </svg>`;
 }
 

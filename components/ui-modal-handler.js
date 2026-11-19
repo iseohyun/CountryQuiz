@@ -6,8 +6,8 @@
 import { getAllProgress } from './db-handler.js';
 import { ALPHABETS, INTERVALS, getFlattenedDataset } from './engine.js';
 import { getCountryByName, getContinentArea } from './country-data.js';
+import { renderProgressMap } from './map-view.js';
 import { userConfig } from './store.js';
-import { getRecentLocalDateKeys } from './date-utils.js';
 
 let analysisMode = 'default';
 
@@ -53,32 +53,34 @@ export function refreshPersonalizedSettings(config) {
   }
 }
 
-export function renderStudyStatsChart(stats) {
-  const container = document.getElementById('study-chart-container');
-  const totalDisplay = document.getElementById('total-study-time');
-
-  if (!container) {
-    console.error("[CRITICAL] '#study-chart-container' 엘리먼트를 DOM에서 찾을 수 없습니다.");
-    return;
+/**
+ * 학습현황 맨 위 「최대 콤보」 막대그래프와 역대 최대 콤보.
+ * @param {Array<{key: string, label: string, value: number}>} entries 기간의 칸들(주·월은 날, 년은 달)
+ * @param {{best: number, bestAt: string|null}} allTime 역대 최대 콤보(판·날짜가 바뀌어도 이어지는 연속 정답)
+ */
+export function renderComboChart(entries, allTime) {
+  const container = document.getElementById('combo-chart');
+  const bestEl = document.getElementById('combo-all-time');
+  if (bestEl) {
+    bestEl.textContent = allTime?.best
+      ? `${allTime.best}콤보${allTime.bestAt ? ` · ${allTime.bestAt}` : ''}`
+      : '아직 없음';
   }
+  if (!container) return;
 
-  const totalMinRounded = Math.round((stats?.total || 0) / 60);
-  if (totalDisplay) totalDisplay.innerText = `${totalMinRounded}분`;
-
-  const days = getRecentLocalDateKeys(7);
-
-  const maxSec = Math.max(...days.map(d => stats?.history?.[d] || 0), 1);
-
-  container.innerHTML = days.map(day => {
-    const sec = stats?.history?.[day] || 0;
-    const height = (sec / maxSec) * 100;
-    const label = day.slice(5);
+  const maxValue = Math.max(...entries.map((e) => e.value), 1);
+  const dense = entries.length > 12;
+  container.classList.toggle('dense', dense);
+  container.innerHTML = entries.map((e, i) => {
+    const height = (e.value / maxValue) * 100;
+    // 한 달 보기는 칸이 많으므로 날짜 글씨를 5일마다만 쓴다
+    const showLabel = !dense || i % 5 === 0 || i === entries.length - 1;
     return `
-      <div style="flex:1; display:flex; flex-direction:column; align-items:center; height:100%; justify-content:flex-end;">
-        <div title="${Math.round(sec / 60)}분" style="width:100%; max-width:30px; height:${height}%; background:#4a90e2; border-radius:4px 4px 0 0; min-height:2px;"></div>
-        <div style="font-size:9px; margin-top:5px; color:#999; white-space:nowrap;">${label}</div>
-      </div>
-    `;
+      <div class="combo-bar-col" title="${escapeHtml(e.key)}: ${e.value}콤보">
+        <span class="combo-bar-value">${e.value && !dense ? e.value : ''}</span>
+        <div class="combo-bar" style="height:${height}%;"></div>
+        <span class="combo-bar-label">${showLabel ? escapeHtml(e.label) : ''}</span>
+      </div>`;
   }).join('');
 }
 
@@ -318,6 +320,16 @@ export function renderProgressTable(domain, domainProgress) {
     const percent = totalArea > 0 ? ((learnedArea / totalArea) * 100).toFixed(1) : "0.0";
     countLabel.innerText = `면적 ${percent}% · ${learnedCount} / ${totalCount}개 나라`;
   }
+
+  // 진도 지도: 표와 같은 색(응답속도 또는 장기기억 단계)으로 대륙 지도의 나라를 칠한다
+  const charIdByName = new Map(getFlattenedDataset(domain).map((item) => [item.char, item.charId]));
+  renderProgressMap(document.getElementById('progress-map'), domain, (country) => {
+    const p = safeProgress[String(charIdByName.get(country.name))];
+    if (!p || !(p.stage > 0)) return null;
+    if (analysisMode === 'stage') return getStageColor(p.stage);
+    const lat = p.recentLatencies?.length ? p.recentLatencies.reduce((a, b) => a + b, 0) / p.recentLatencies.length / 1000 : 0;
+    return getLatencyColor(lat);
+  });
 }
 
 /**

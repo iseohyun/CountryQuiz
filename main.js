@@ -4,6 +4,7 @@
  * 세션 워크플로우(학습/기록/관전 모드), 타이머 루프, 원격 모달 마운트 및 전역 단축키 이벤트를 총괄 제어합니다.
  */
 
+import { refreshInstallButtons } from './components/install-prompt.js'; // 설치 신호(beforeinstallprompt)를 일찍 받아 둔다
 import {
   userConfig,
   resetUserConfig,
@@ -28,13 +29,16 @@ import {
   updateDailyStats,
   getUserConfig,
   saveUserConfig,
-  getWeeklyStats,
+  loadComboState,
+  saveComboStats,
+  getComboHistory,
   submitSpeedrunRanking,
   getGlobalRankings,
   getStudyRankings,
   submitStudyRanking,
   toPersistedSchema,
   findGuestProgressToMerge,
+  mergeGuestCombo,
   markGuestMergeHandled,
   mergeGuestProgress,
   submitTimeAttackRanking,
@@ -56,7 +60,7 @@ import {
   INTERVALS
 } from './components/engine.js';
 import {
-  renderStudyStatsChart,
+  renderComboChart,
   renderResponseTimeChart,
   renderProgressTable,
   getStageColor,
@@ -78,9 +82,11 @@ import { initSettingNewDot, hasUnseenVersion, markVersionSeen } from './componen
 import { openHintListModal, renderHintHallOfFame } from './components/hint-handler.js';
 import { SEASONS, SEASON_META, WEATHER_META, getSeasonByDate, getApproxWeather } from './components/season-weather.js';
 import { startLetterStage } from './components/letter-stage.js';
+import { getTrailingStreak, showCombo } from './components/combo-fx.js';
+import { renderSisterAppsHtml, hydrateSisterApps } from './components/sister-apps.js';
 import {
   CONTINENTS, QUIZ_TYPES, DEFAULT_QUIZ_TYPES, getCountryByName, getContinent, getContinentArea,
-  renderQuestionHtml, renderFactLine, conflictsWithAnswer, renderHintChipHtml
+  renderQuestionHtml, renderOptionHtml, renderFactLine, conflictsWithAnswer, renderHintChipHtml
 } from './components/country-data.js';
 import { renderWorldMap, renderContinentIcon } from './components/map-view.js';
 
@@ -99,18 +105,18 @@ function playTargetVoice(name) {
     if (facts) facts.innerHTML = renderFactLine(country);
     return;
   }
-  // 지도에 나라를 칠하는 것은 「위치」 문제이거나 위치 힌트를 열었을 때만
-  const showOnMap = currentQuestion?.type === 'map' || revealedHints.includes('map');
-  renderWorldMap(document.getElementById('quiz-map'), showOnMap ? country : null,
-    { focusContinent: showOnMap ? country.continent : null, viewDomains: getActiveDomains() });
+  // 지도에는 늘 문제의 나라를 칠한다. 문제 종류는 보기의 형식(이름·수도·국기…)을 정한다
+  renderWorldMap(document.getElementById('quiz-map'), country,
+    { focusContinent: country.continent, viewDomains: getActiveDomains() });
   const questionEl = document.getElementById('quiz-question');
-  if (questionEl) questionEl.innerHTML = renderQuestionHtml(currentQuestion?.type, country);
+  if (questionEl) questionEl.innerHTML = renderQuestionHtml(currentQuestion?.type);
   const hintsEl = document.getElementById('quiz-hints');
-  if (hintsEl) hintsEl.innerHTML = revealedHints.filter((t) => t !== 'map').map((t) => renderHintChipHtml(t, country)).join('');
+  if (hintsEl) hintsEl.innerHTML = revealedHints.map((t) => renderHintChipHtml(t, country)).join('');
 }
 
-/* ---------- 💡 단계별 힌트: 누를 때마다 문제와 다른 정보를 하나씩 공개 ---------- */
-const HINT_ORDER = ['map', 'flag', 'capital', 'language', 'area', 'government', 'leader'];
+/* ---------- 💡 단계별 힌트: 누를 때마다 정답 형식이 아닌 정보를 하나씩 공개 ---------- */
+// 지도는 늘 보이고, 나라 이름은 정답을 바로 알려 주므로 힌트에 없다. 지금 문제 종류(보기의 형식)도 뺀다
+const HINT_ORDER = ['flag', 'capital', 'language', 'area', 'government', 'leader'];
 let revealedHints = [];
 
 /** 고른 퀴즈 범위(문제 종류). 비면 기본(수도·국기) */
@@ -322,7 +328,9 @@ async function initApp() {
 
     // 로그인 사용자와 게스트 모두 저장된 설정을 불러온다 (기존에는 게스트 설정이 새로고침마다 초기화됨)
     applySavedConfig(await getUserConfig());
+    comboState = await loadComboState();
     setLanguage(userConfig.uiLanguage);
+    applyAccentColor(userConfig.accentColor);
 
     window.currentDomain = userConfig.currentDomain;
     updateDomainUI();
@@ -350,19 +358,21 @@ function applySavedConfig(savedConfig) {
  * 로그인 직후, 같은 기기에서 게스트로 학습한 기록을 계정으로 가져올지 묻는다.
  * 계정 기록이 더 최신인 문자는 건드리지 않는다.
  */
+/**
+ * 로그인하면 이 기기에서 게스트로 학습한 기록을 계정에 바로 합친다(묻지 않음).
+ * 새 계정이든 이미 있는 계정이든 같고, 글자마다 더 최근에 학습한 쪽을 남긴다. 콤보 기록은 큰 쪽을 남긴다.
+ */
 async function offerGuestProgressMerge() {
   const candidate = findGuestProgressToMerge();
+  const comboMerged = await mergeGuestCombo();
   if (!candidate || candidate.items.length === 0) return;
 
-  const shouldMerge = confirm(
-    `이 기기에서 게스트로 학습한 기록이 ${candidate.items.length}개 문자 있습니다.\n` +
-    `로그인한 계정으로 가져올까요?\n\n(계정 기록이 더 최신인 문자는 그대로 둡니다)`
-  );
   markGuestMergeHandled(candidate.flagKey);
-  if (!shouldMerge) return;
-
   const mergedCount = await mergeGuestProgress(candidate.items);
   console.log(`[GuestMerge] 게스트 학습 기록 ${mergedCount}개 문자를 계정으로 가져왔습니다.`);
+  showInfoOverlay('게스트 기록을 합쳤어요', `
+    <p class="study-summary-note" style="font-size:0.9rem;">이 기기에서 게스트로 학습한 <b>${mergedCount}개 글자</b>의 진도${comboMerged ? '와 콤보 기록' : ''}을 로그인한 계정에 합쳤습니다.
+    계정에 더 최근 기록이 있는 글자는 계정 기록을 그대로 두었습니다.</p>`);
 }
 
 const PROVIDER_META = {
@@ -593,8 +603,9 @@ function renderOptionButtons(optionsContainer, onAnswerCallback) {
     btn.className = 'option-btn';
 
     const matchingItem = currentQuestion.optionItems?.[charId] || currentPool.find(p => p.charId === charId);
-    const charText = matchingItem ? matchingItem.char : '';
-    btn.innerHTML = `<span class="keybind-hint">${OPTION_KEYBIND_HINTS[idx]}</span><span>${charText}</span>`;
+    // 보기는 문제 종류에 맞는 형식으로(국기 문제면 국기 그림, 수도 문제면 수도 이름)
+    const optionHtml = matchingItem ? renderOptionHtml(currentQuestion.type, getCountryByName(matchingItem.char)) : '';
+    btn.innerHTML = `<span class="keybind-hint">${OPTION_KEYBIND_HINTS[idx]}</span><span class="option-value">${optionHtml}</span>`;
     btn.dataset.charId = charId;
 
     btn.onclick = () => {
@@ -638,16 +649,28 @@ async function startQuizSession() {
   if (historyBar) historyBar.innerHTML = '';
 
   // 여러 범위를 골랐으면 범위마다 몫을 나눠 풀을 만들고 합친다
+  const group = getDomainGroup(userConfig.currentDomain);
   const domains = getActiveDomains();
   const perDomainSize = Math.max(4, Math.ceil(userConfig.MAX_POOL_SIZE / domains.length));
   currentPool = [];
-  for (const [domainIndex, domain] of domains.entries()) {
+  for (const domain of domains) {
     const dbData = await getAllProgress(domain);
     const pool = initSessionPool(domain, dbData, userConfig.autoProgress, perDomainSize);
-    currentPool.push(...pool.map((item) => tagPoolItem(item, domain, domainIndex)));
+    currentPool.push(...pool.map((item) => tagPoolItem(item, domain, group.domains.indexOf(domain))));
   }
-  if (currentPool.length > userConfig.MAX_POOL_SIZE && domains.length > 1) {
-    currentPool = currentPool.sort(() => Math.random() - 0.5).slice(0, Math.max(userConfig.MAX_POOL_SIZE, 4));
+  // 꺼 둔 같은 언어 범위라도 복습할 때가 된 글자는 함께 낸다(새 글자는 켜 둔 범위에서만)
+  for (const domain of group.domains.filter((d) => !domains.includes(d))) {
+    const dbData = await getAllProgress(domain);
+    const dueItems = initSessionPool(domain, dbData, false, userConfig.MAX_POOL_SIZE).filter((item) => item.isEligibleForPromotion);
+    currentPool.push(...dueItems.map((item) => tagPoolItem(item, domain, group.domains.indexOf(domain))));
+  }
+  // 넘치면 복습할 글자를 먼저 남기고 자른다
+  const poolLimit = Math.max(userConfig.MAX_POOL_SIZE, 4);
+  if (currentPool.length > poolLimit) {
+    currentPool = currentPool
+      .sort(() => Math.random() - 0.5)
+      .sort((a, b) => Number(b.isEligibleForPromotion) - Number(a.isEligibleForPromotion))
+      .slice(0, poolLimit);
   }
 
   if (!currentPool || currentPool.length === 0) {
@@ -768,6 +791,8 @@ async function handleUserAnswer(selectedCharId, latency) {
     speed: latency
   });
   updateHistoryBarUI();
+  if (isCorrect) showCombo(getTrailingStreak(sessionHistory));
+  trackRunningCombo(isCorrect);
 
   if (!isCorrect) {
     await handleErrorFeedback(target.charId);
@@ -840,6 +865,7 @@ async function terminateQuizSession() {
 
   resetToMainModeSelection();
   showStudySummary();
+  saveComboStats(getSessionMaxCombo(sessionHistory), comboState);
 
   // 복습 알림 예약은 Firestore 저장과 따로 먼저 시작한다.
   // 연결이 나쁘면 Firestore 저장이 끝나지 않고 멈춰 있어, 그 뒤에 두면 예약 요청이 아예 나가지 않는다.
@@ -872,7 +898,7 @@ async function terminateQuizSession() {
     const accuracy = sessionHistory.length > 0 ? Math.round((correctCount / sessionHistory.length) * 100) : 0;
     const { recordDomain, playerName } = resolveRankingMetadata();
 
-    await submitStudyRanking(recordDomain, correctCount, playedTime, accuracy, playerName);
+    if (canSubmitRanking()) await submitStudyRanking(recordDomain, correctCount, playedTime, accuracy, playerName);
     console.log(`[Quiz] 학습 세션 정상 마감 완료 - 정답수: ${correctCount}, 시간: ${formatTime(playedTime)}, 정답률: ${accuracy}%`);
   } catch (dbError) {
     console.warn("[LocalFirst] 학습모드 완료 백엔드 등록 안내 (로컬 저장 완료):", dbError.message || dbError);
@@ -943,7 +969,32 @@ function showStudySummary() {
       </tr></tfoot>
     </table>
     <p class="study-summary-note">응답속도는 최근 기록 평균입니다. 강급후보는 이번에 틀렸거나 전보다 느려진 나라입니다.</p>
+    ${rankingLoginNoteHtml()}
   `);
+  bindRankingLoginNote();
+}
+
+/** 순위에는 로그인한 사용자만 올린다. 게스트도 학습·기록 모드는 그대로 할 수 있다. */
+function canSubmitRanking() {
+  return Boolean(auth.currentUser);
+}
+
+/** 게스트에게 결과 창 아래에 보이는 로그인 안내(기록 합치기·순위) */
+function rankingLoginNoteHtml() {
+  if (canSubmitRanking()) return '';
+  return `
+    <div class="ranking-login-note">
+      <span>로그인하면 지금까지 게스트로 학습한 기록이 계정에 합쳐져 다른 기기에서도 이어서 할 수 있고, 다음 기록부터 리더보드에도 올라갑니다.</span>
+      <button type="button" class="ranking-login-btn">로그인</button>
+    </div>`;
+}
+
+function bindRankingLoginNote() {
+  document.querySelector('.info-overlay .ranking-login-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.querySelector('.info-overlay')?.remove();
+    window.popupLogin();
+  });
 }
 
 /**
@@ -1135,13 +1186,15 @@ async function terminateTimeAttackSession() {
       <strong>${taCorrectCount}</strong><span>개 맞힘</span>
     </div>
     <p class="study-summary-note">푼 문제 ${taSolvedCount}개 · 정답률 ${accuracy}%${finishedInTime ? '' : ' · 중간에 그만둔 기록은 순위에 올리지 않습니다.'}</p>
+    ${finishedInTime ? rankingLoginNoteHtml() : ''}
   `);
+  bindRankingLoginNote();
 
   try {
     const itemsToSave = currentPool.filter(item => item.isUnlocked && item.touched);
     if (itemsToSave.length > 0) await savePoolByDomain(itemsToSave);
     await updateDailyStudyTime(playedSec, userConfig.currentDomain);
-    if (finishedInTime && taSolvedCount > 0) {
+    if (finishedInTime && taSolvedCount > 0 && canSubmitRanking()) {
       const { recordDomain, playerName } = resolveRankingMetadata();
       await submitTimeAttackRanking(recordDomain, taCorrectCount, taSolvedCount, accuracy, playerName);
     }
@@ -1268,6 +1321,19 @@ async function terminateSpeedrunSession() {
 
   resetToMainModeSelection();
 
+  const finishedAll = srCurrentIndex >= srTotalCount;
+  const srAccuracy = srTotalCount > 0 ? Math.round((srCorrectCount / srTotalCount) * 100) : 0;
+  if (finishedAll) {
+    showInfoOverlay(t('mode.record20'), `
+      <div class="timeattack-result">
+        <strong>${formatTime(srElapsedTime).replace(/^00:/, '')}</strong>
+      </div>
+      <p class="study-summary-note">${srTotalCount}문제 · 맞힘 ${srCorrectCount}개 · 정답률 ${srAccuracy}%</p>
+      ${rankingLoginNoteHtml()}
+    `);
+    bindRankingLoginNote();
+  }
+
   try {
     // 20문제 안에서 나온 글자만 진도를 고친다
     const itemsToSave = currentPool.slice(0, srTotalCount).filter(item => item.isUnlocked);
@@ -1282,7 +1348,7 @@ async function terminateSpeedrunSession() {
     const { recordDomain, playerName } = resolveRankingMetadata();
 
     // 20문제를 다 풀었을 때만 순위에 올린다(중간에 그만두면 올리지 않음)
-    if (srCurrentIndex >= srTotalCount) {
+    if (finishedAll && canSubmitRanking()) {
       await submitSpeedrunRanking(recordDomain, srTotalCount, srElapsedTime, accuracy, playerName);
     }
     console.log(`[Speedrun] 기록 모드 완료 - 소요 시간: ${formatTime(srElapsedTime)}, 정답률: ${accuracy}%`);
@@ -2009,7 +2075,7 @@ async function openRemoteModalPopup(viewName, options = {}) {
     };
     const modalTitle = viewTitles[viewName] || '안내';
     const isSetting = viewName === 'setting';
-    const isFullScreen = ['setting', 'leaderboard', 'progress'].includes(viewName);
+    const isFullScreen = ['setting', 'leaderboard', 'progress', 'help'].includes(viewName);
     const versionIsNew = isSetting && hasUnseenVersion();
     const closeBtnHtml = `
             <button type="button" class="modal-close setting-tool-btn" data-i18n-title="setting.close">
@@ -2021,7 +2087,13 @@ async function openRemoteModalPopup(viewName, options = {}) {
     overlay.innerHTML = isFullScreen ? `
       <div class="modal-content">
         <div class="modal-header full-screen-header">
-          <h3 class="modal-title">${isSetting ? 'CountryQuiz' : modalTitle}</h3>
+          <div class="full-screen-title">
+            ${isSetting ? `
+            <button type="button" class="setting-tool-btn install-app-btn install-has-dot" data-i18n-title="setting.install" hidden>
+              <span class="material-symbols-outlined">install_desktop</span>
+            </button>` : ''}
+            <h3 class="modal-title">${isSetting ? 'CountryQuiz' : modalTitle}</h3>
+          </div>
           <div class="setting-toolbar">
             ${isSetting ? `
             <button type="button" class="setting-tool-btn" id="setting-inbox-btn" data-i18n-title="setting.inbox">
@@ -2101,6 +2173,12 @@ async function openRemoteModalPopup(viewName, options = {}) {
       // 처음에는 시험에 켜 둔 범위, 둘 다 켜져 있으면 앞의 것(히라가나, 대문자)
       window.progressViewDomain = getActiveDomains()[0];
       renderProgressDomainTabs(overlay);
+      overlay.querySelectorAll('.combo-range-tab').forEach((tab) => {
+        tab.addEventListener('click', (e) => {
+          e.stopPropagation();
+          renderComboStats(tab.dataset.range);
+        });
+      });
       await renderProgressView(window.progressViewDomain);
     }
 
@@ -2134,6 +2212,18 @@ async function openRemoteModalPopup(viewName, options = {}) {
       renderLoginModalState(auth.currentUser);
     }
 
+    if (viewName === 'help') {
+      // QuizQuiz 자매품 홍보는 도움말 맨 위 (quiz_apps 목록에서 이 앱을 뺀 나머지)
+      overlay.querySelector('.modal-body')?.insertAdjacentHTML('afterbegin', renderSisterAppsHtml());
+      hydrateSisterApps(overlay);
+      overlay.querySelector('.modal-body')?.insertAdjacentHTML('beforeend', `
+        <div class="app-version-box">
+          <div><span>프로그램 버전</span><b>CountryQuiz ${window.APP_VERSION || '-'}</b></div>
+          <div><span>빌드</span><b>${window.CACHE_BUST || '-'}</b></div>
+          <div><span>QuizApp Common GUI</span><b>${window.QUIZAPP_GUI_VERSION || '-'}</b></div>
+        </div>`);
+    }
+
     if (viewName === 'progress') {
       overlay.querySelector('#progress-help-btn')?.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -2151,6 +2241,7 @@ async function openRemoteModalPopup(viewName, options = {}) {
     if (viewName === 'setting') {
       applyI18n(overlay);
       localizeSettingOptions(overlay);
+      refreshInstallButtons();
       markVersionSeen();
       updateInboxBadge();
 
@@ -2232,6 +2323,18 @@ async function openRemoteModalPopup(viewName, options = {}) {
         }
       };
 
+      // 테마색(강조색)
+      const accentSwatches = overlay.querySelectorAll('.accent-swatch');
+      const markAccent = () => accentSwatches.forEach((sw) => sw.setAttribute('aria-checked', String(sw.dataset.accent === (userConfig.accentColor || 'pink'))));
+      markAccent();
+      accentSwatches.forEach((sw) => sw.addEventListener('click', (e) => {
+        e.stopPropagation();
+        userConfig.accentColor = sw.dataset.accent;
+        applyAccentColor(userConfig.accentColor);
+        markAccent();
+        saveUserConfig(userConfig);
+      }));
+
       const languageSelect = overlay.querySelector('#ui-language');
       if (languageSelect) {
         languageSelect.value = userConfig.uiLanguage || 'ko';
@@ -2306,6 +2409,16 @@ async function openRemoteModalPopup(viewName, options = {}) {
   }
 }
 
+const ACCENT_COLORS = ['pink', 'blue', 'green', 'purple', 'orange'];
+
+/** 테마색(강조색)을 화면 전체에 적용한다. 바탕·글자색은 그대로이고 버튼·선택 표시·콤보 등 강조 부분만 바뀐다 */
+function applyAccentColor(name) {
+  const accent = ACCENT_COLORS.includes(name) ? name : 'pink';
+  document.documentElement.dataset.accent = accent;
+  // index.html 이 다음에 열 때 설정을 읽기 전부터 같은 색으로 그리도록 기기에도 적어 둔다
+  try { localStorage.setItem('COUNTRYQUIZ_ACCENT', accent); } catch { /* 무시 */ }
+}
+
 /** 설정 화면의 연령대 보기(10대 → 10s, 10代)를 지금 언어로 바꾼다. */
 function localizeSettingOptions(root) {
   root.querySelectorAll('#user-age option[data-age]').forEach((option) => {
@@ -2347,8 +2460,48 @@ async function renderProgressView(domain) {
   const domainData = await getAllProgress(domain);
   await renderResponseTimeChart(domain);
   renderProgressTable(domain, domainData);
-  const weeklyStats = await getWeeklyStats(domain);
-  renderStudyStatsChart(weeklyStats || { total: 0, history: {} });
+  await renderComboStats(comboRange);
+}
+
+/* ---------- 콤보 기록 ---------- */
+let comboState = { current: 0, best: 0, bestAt: null }; // 판·날짜가 바뀌어도 이어지는 연속 정답과 역대 최대
+let comboRange = 'week';
+
+/** 학습 모드 답 하나를 이어지는 콤보에 반영한다 */
+function trackRunningCombo(isCorrect) {
+  if (!isCorrect) {
+    comboState.current = 0;
+    return;
+  }
+  comboState.current += 1;
+  if (comboState.current > comboState.best) {
+    comboState.best = comboState.current;
+    comboState.bestAt = toLocalDateKeyForCombo();
+  }
+}
+
+function toLocalDateKeyForCombo(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** 이번 판에서 가장 길게 이어진 정답 수 */
+function getSessionMaxCombo(history) {
+  let best = 0;
+  let run = 0;
+  history.forEach((h) => {
+    run = h.isCorrect ? run + 1 : 0;
+    best = Math.max(best, run);
+  });
+  return best;
+}
+
+/** 학습현황의 최대 콤보 그래프(주·월·년)와 역대 최대 */
+async function renderComboStats(range) {
+  comboRange = range;
+  document.querySelectorAll('.combo-range-tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.range === range));
+  const entries = await getComboHistory(range);
+  renderComboChart(entries, comboState);
 }
 
 /** 학습현황 맨 위의 범위 단추. 언어에 범위가 하나뿐이면 그리지 않는다. */
@@ -2535,12 +2688,12 @@ async function updateReviewCountBadge() {
   if (!badge) return;
 
   try {
-    const domain = userConfig.currentDomain;
-    const dbData = await getAllProgress(domain) || {};
+    // 학습에는 같은 언어의 모든 범위에서 복습 글자를 내므로 배지도 언어 전체를 센다
     const now = Date.now();
-    const rows = ALPHABETS[domain] || [];
-
     let count = 0;
+    for (const domain of getDomainGroup(userConfig.currentDomain).domains) {
+    const dbData = await getAllProgress(domain) || {};
+    const rows = ALPHABETS[domain] || [];
     let idCounter = 0;
 
     for (const row of rows) {
@@ -2561,6 +2714,7 @@ async function updateReviewCountBadge() {
           }
         }
       }
+    }
     }
 
     if (count > 0) {

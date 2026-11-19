@@ -2,8 +2,9 @@
  * @file components/country-data.js
  * @description 나라 데이터(data/countries.js)를 퀴즈에 맞게 묶는다.
  *  - 대륙 = 챕터(도메인). 대륙 안의 나라는 면적이 큰 순서로 늘어서고, 그 순서가 글자 ID(charId)가 된다.
- *  - 퀴즈 범위(문제 종류): 나라 이름(지도에 칠한 나라)·수도·국기·면적·정치체계·지도자·언어. 기본은 나라 이름·수도·국기.
- *  - 보기는 늘 나라 이름이다. 정답과 같은 답을 가진 나라(같은 정치체계, 같은 언어 등)는 보기에서 뺀다.
+ *  - 퀴즈 범위(문제 종류): 나라 이름·수도·국기·면적·정치체계·지도자·언어. 기본은 나라 이름·수도·국기.
+ *  - 지도에는 늘 문제의 나라가 빛나고, 문제 종류에 맞는 형식으로 보기 4개가 나온다(국기 문제면 국기 그림).
+ *    정답과 같은 답을 가진 나라(같은 정치체계, 같은 언어 등)는 보기에서 뺀다.
  */
 
 import { COUNTRIES, LEADER_DATA_AS_OF } from '../data/countries.js';
@@ -62,16 +63,42 @@ function escapeHtml(str) {
 
 const formatArea = (km2) => `${km2.toLocaleString('ko-KR')} km²`;
 
-/** 문제 글. 국기는 그림, 위치는 지도만 보고 고른다 */
-export function renderQuestionHtml(type, country) {
+/** 면적 순위(1위 = 가장 큼). 대륙 안 순위와 세계 순위 */
+const worldAreaRank = new Map([...COUNTRIES].sort((a, b) => b.area - a.area).map((c, i) => [c.name, i + 1]));
+export function getAreaRanks(country) {
+  const continentRank = COUNTRIES.filter((c) => c.continent === country.continent && c.area > country.area).length + 1;
+  return { continentRank, worldRank: worldAreaRank.get(country.name) };
+}
+
+/** 면적 힌트 글: 「약 9,596,960 km² · 아시아 2위 · 세계 4위」 */
+function formatAreaHint(country) {
+  const { continentRank, worldRank } = getAreaRanks(country);
+  return `약 ${formatArea(country.area)} · ${getContinent(country.continent).name} ${continentRank}위 · 세계 ${worldRank}위`;
+}
+
+/**
+ * 문제 글. 지도에는 늘 그 나라가 빛나고, 문제 종류는 「무엇을 고르는지」(보기의 형식)를 정한다.
+ * 예: 국기 문제 = 지도에 빛나는 나라의 국기를 보기 4개 중에서 고른다.
+ */
+export function renderQuestionHtml(type) {
+  const label = type === 'map' ? '이름' : (QUIZ_TYPES.find((q) => q.id === type)?.label || '이름');
+  const asOf = type === 'leader' ? ` <small>(${LEADER_DATA_AS_OF} 기준)</small>` : '';
+  const last = label.charCodeAt(label.length - 1) - 0xac00;
+  const particle = last >= 0 && last < 11172 && last % 28 ? '은' : '는';
+  return `<span class="q-label">지도에 빛나는 나라의 <b>${escapeHtml(label)}</b>${particle}?${asOf}</span>`;
+}
+
+/** 보기 한 칸. 문제 종류에 맞는 형식(나라 이름·수도·국기 그림·면적…)으로 보인다 */
+export function renderOptionHtml(type, country) {
+  if (!country) return '';
   switch (type) {
-    case 'capital': return `<span class="q-label">수도</span><strong class="q-value">${escapeHtml(country.capital)}</strong>`;
-    case 'flag': return `<img class="q-flag" src="./assets/flags/${country.cca2}.svg" alt="국기">`;
-    case 'area': return `<span class="q-label">면적</span><strong class="q-value">약 ${escapeHtml(formatArea(country.area))}</strong>`;
-    case 'government': return `<span class="q-label">정치체계</span><strong class="q-value">${escapeHtml(country.government)}</strong>`;
-    case 'leader': return `<span class="q-label">지도자 (${LEADER_DATA_AS_OF} 기준)</span><strong class="q-value">${escapeHtml(country.leader)}</strong>`;
-    case 'language': return `<span class="q-label">언어</span><strong class="q-value">${escapeHtml(country.languages.join(', '))}</strong>`;
-    default: return '<span class="q-label">지도에 빛나는 나라는?</span>';
+    case 'capital': return escapeHtml(country.capital);
+    case 'flag': return `<img class="option-flag" src="./assets/flags/${country.cca2}.svg" alt="국기">`;
+    case 'area': return `약 ${escapeHtml(formatArea(country.area))}`;
+    case 'government': return escapeHtml(country.government);
+    case 'leader': return escapeHtml(country.leader);
+    case 'language': return escapeHtml(country.languages.join(', '));
+    default: return escapeHtml(country.name);
   }
 }
 
@@ -81,7 +108,7 @@ export function renderHintChipHtml(type, country) {
   if (type === 'flag') return `<span class="hint-chip"><img src="./assets/flags/${country.cca2}.svg" alt="국기"></span>`;
   const value = {
     capital: country.capital,
-    area: `약 ${formatArea(country.area)}`,
+    area: formatAreaHint(country),
     government: country.government,
     leader: country.leader,
     language: country.languages.join(', ')
@@ -103,5 +130,6 @@ export function conflictsWithAnswer(type, answer, other) {
   if (type === 'language') return other.languages.some((l) => answer.languages.includes(l));
   if (type === 'area') return Math.abs(answer.area - other.area) / Math.max(answer.area, 1) < 0.15;
   if (type === 'leader') return answer.leader === other.leader;
+  if (type === 'capital') return answer.capital === other.capital;
   return false;
 }

@@ -10,7 +10,7 @@
   <link rel="alternate icon" type="image/png" href="./icon.png">
   <link rel="apple-touch-icon" href="./icon.png">
   <link rel="manifest" href="./manifest.webmanifest">
-  <meta name="theme-color" content="#fcfdff">
+  <meta name="theme-color" content="#ffffff">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;800&family=Noto+Sans+KR:wght@400;500;700;800&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
@@ -18,7 +18,11 @@
     href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
   <script>
     window.APP_VERSION = "v0.1.0";
-    window.CACHE_BUST = "20261120v7";
+    // 테마색(강조색)을 설정을 읽기 전부터 적용해 분홍이 잠깐 비치지 않게 한다 (main.js 의 applyAccentColor 가 적어 둠)
+    try { document.documentElement.dataset.accent = localStorage.getItem("COUNTRYQUIZ_ACCENT") || "pink"; } catch (e) { /* 무시 */ }
+    // 이 앱이 따르는 QuizApp Common GUI 판 (iseohyun.com 의 column/ai/quizapp-common-gui). 도움말 맨 아래에 보여 준다
+    window.QUIZAPP_GUI_VERSION = "v0.2.0";
+    window.CACHE_BUST = "20261120v13";
 
     const cssLink = document.createElement("link");
     cssLink.rel = "stylesheet";
@@ -30,8 +34,8 @@
     // ⚠️ components/ 에 모듈을 추가하면 아래 목록에도 추가할 것 (.agents/rules/project_architecture.md 참고)
     (function registerVersionedImportMap() {
       const componentModules = [
-        "app-config", "audio-manager", "auth-handler", "date-utils", "db-handler", "engine",
-        "firebase-config", "country-data", "hint-handler", "map-view", "i18n", "keybind-manager", "letter-stage", "new-dot", "notification-handler", "notification-inbox", "season-weather", "sister-apps",
+        "app-config", "audio-manager", "auth-handler", "combo-fx", "date-utils", "db-handler", "engine",
+        "firebase-config", "country-data", "hint-handler", "map-view", "i18n", "install-prompt", "keybind-manager", "letter-stage", "new-dot", "notification-handler", "notification-inbox", "season-weather", "sister-apps",
         "store", "ui-modal-handler", "update-checker"
       ];
       const imports = {};
