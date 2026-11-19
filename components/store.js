@@ -12,7 +12,7 @@ export const userConfig = {
   currentDomain: 'asia',
   activeDomains: ['asia'], // 요약 카드에서 함께 고른 범위(같은 언어 묶음 안). 첫 번째가 currentDomain
   errorFeedbackMode: 'visual_only',
-  quizTypes: ['capital', 'flag'], // 퀴즈 범위(문제 종류). components/country-data.js 의 QUIZ_TYPES
+  quizTypes: ['map', 'capital', 'flag'], // 퀴즈 범위(문제 종류). components/country-data.js 의 QUIZ_TYPES
   weatherTheme: true, // 처음 화면 무대에 대략의 날씨(IP 위치)를 반영할지 (components/season-weather.js)
   uiLanguage: 'ko', // 화면 언어: 'ko' | 'en' | 'ja' (components/i18n.js)
   spectatorInterval: 1, // 관전모드 출력 주기 (초)

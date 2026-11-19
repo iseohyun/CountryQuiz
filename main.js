@@ -80,9 +80,9 @@ import { SEASONS, SEASON_META, WEATHER_META, getSeasonByDate, getApproxWeather }
 import { startLetterStage } from './components/letter-stage.js';
 import {
   CONTINENTS, QUIZ_TYPES, DEFAULT_QUIZ_TYPES, getCountryByName, getContinent, getContinentArea,
-  renderQuestionHtml, renderFactLine, conflictsWithAnswer
+  renderQuestionHtml, renderFactLine, conflictsWithAnswer, renderHintChipHtml
 } from './components/country-data.js';
-import { renderWorldMap } from './components/map-view.js';
+import { renderWorldMap, renderContinentIcon } from './components/map-view.js';
 
 /* ---------- 나라 문제 화면 (CharQuiz 의 소리 재생 자리) ---------- */
 /** 소리 미리 받기는 나라 퀴즈에 필요 없다 */
@@ -94,15 +94,24 @@ function playTargetVoice(name) {
   if (!country) return;
   const spectatorMap = document.getElementById('spectator-map');
   if (spectatorMap) {
-    renderWorldMap(spectatorMap, country, { focusContinent: country.continent });
+    renderWorldMap(spectatorMap, country, { focusContinent: country.continent, viewDomains: getActiveDomains() });
     const facts = document.getElementById('spectator-facts');
     if (facts) facts.innerHTML = renderFactLine(country);
     return;
   }
-  renderWorldMap(document.getElementById('quiz-map'), country, { focusContinent: country.continent });
+  // 지도에 나라를 칠하는 것은 「위치」 문제이거나 위치 힌트를 열었을 때만
+  const showOnMap = currentQuestion?.type === 'map' || revealedHints.includes('map');
+  renderWorldMap(document.getElementById('quiz-map'), showOnMap ? country : null,
+    { focusContinent: showOnMap ? country.continent : null, viewDomains: getActiveDomains() });
   const questionEl = document.getElementById('quiz-question');
   if (questionEl) questionEl.innerHTML = renderQuestionHtml(currentQuestion?.type, country);
+  const hintsEl = document.getElementById('quiz-hints');
+  if (hintsEl) hintsEl.innerHTML = revealedHints.filter((t) => t !== 'map').map((t) => renderHintChipHtml(t, country)).join('');
 }
+
+/* ---------- 💡 단계별 힌트: 누를 때마다 문제와 다른 정보를 하나씩 공개 ---------- */
+const HINT_ORDER = ['map', 'flag', 'capital', 'language', 'area', 'government', 'leader'];
+let revealedHints = [];
 
 /** 고른 퀴즈 범위(문제 종류). 비면 기본(수도·국기) */
 function getEnabledQuizTypes() {
@@ -119,6 +128,7 @@ function buildFallbackPool() {
 
 /** 문제 종류를 고르고 4지선다를 만든다 */
 function makeQuestion(targetItem) {
+  revealedHints = [];
   const types = getEnabledQuizTypes();
   const type = types[Math.floor(Math.random() * types.length)];
   const answer = getCountryByName(targetItem.char);
@@ -711,9 +721,21 @@ function bindQuizHintButton() {
   const hintBtn = document.getElementById('quiz-hint-btn');
   if (!hintBtn) return;
   hintBtn.hidden = currentMode !== 'study';
+  revealedHints = [];
+  const nextHints = () => HINT_ORDER.filter((t) => t !== currentQuestion?.type && !revealedHints.includes(t));
+  hintBtn.title = '힌트 하나 보기';
   hintBtn.onclick = () => {
     const target = currentQuestion?.target;
     if (!target || isTimeUp) return;
+    // 아직 열 정보가 남았으면 하나만 연다
+    const remaining = nextHints();
+    if (remaining.length) {
+      revealedHints.push(remaining[0]);
+      playTargetVoice(target.char);
+      if (!nextHints().length) hintBtn.title = '사용자 힌트 보기·쓰기';
+      return;
+    }
+    // 다 열었으면 사용자 힌트 목록
     const pausedByHint = !isPaused;
     if (pausedByHint) window.pauseGameTrigger();
     openHintListModal(target.domain || userConfig.currentDomain, target.char, {
@@ -1548,7 +1570,7 @@ async function renderDomainSummary() {
       ${group.domains.map((d) => {
         const on = activeDomains.includes(d);
         return `<button type="button" class="summary-domain${on ? ' active' : ''}" data-domain="${d}"
-          aria-pressed="${on}">${t(`summary.${d}`)}</button>`;
+          aria-pressed="${on}" title="${t(`summary.${d}`)}" aria-label="${t(`summary.${d}`)}">${renderContinentIcon(d, { size: 24 })}</button>`;
       }).join('')}
     </div>
     <p class="summary-count"><b>${t('summary.area')} ${percent}%</b> · ${unlocked} / ${total} ${t('summary.unlocked')}</p>
@@ -1556,6 +1578,7 @@ async function renderDomainSummary() {
   card.querySelectorAll('.summary-domain').forEach((btn) => {
     btn.addEventListener('click', () => toggleActiveDomain(btn.dataset.domain));
   });
+  renderSummaryQuizTypes(card);
   renderSeasonStage(card, activeDomains);
 }
 
@@ -1596,6 +1619,30 @@ function renderSeasonStage(card, domains) {
   }
 }
 
+/** 요약 카드의 퀴즈 범위 칩. 설정의 「퀴즈 범위」와 같은 값(userConfig.quizTypes)을 쓴다 */
+function renderSummaryQuizTypes(card) {
+  const enabled = getEnabledQuizTypes();
+  const box = document.createElement('div');
+  box.className = 'summary-quiz-types';
+  box.innerHTML = QUIZ_TYPES.map((q) => `
+    <button type="button" class="summary-quiz-type${enabled.includes(q.id) ? ' active' : ''}" data-type="${q.id}"
+      aria-pressed="${enabled.includes(q.id)}">${q.label}</button>`).join('');
+  box.querySelectorAll('.summary-quiz-type').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const current = getEnabledQuizTypes();
+      const next = current.includes(btn.dataset.type)
+        ? current.filter((t) => t !== btn.dataset.type)
+        : [...current, btn.dataset.type];
+      if (!next.length) return; // 하나는 남긴다
+      userConfig.quizTypes = QUIZ_TYPES.map((q) => q.id).filter((id) => next.includes(id));
+      saveUserConfig(userConfig);
+      renderDomainSummary();
+    });
+  });
+  card.querySelector('.summary-count')?.before(box);
+}
+
 /** 요약 카드에서 범위 하나를 고르거나 뺀다. 지금 도메인(헤더 글자)은 고른 것 중 묶음의 첫 번째. */
 function toggleActiveDomain(domain) {
   const active = getActiveDomains();
@@ -1616,7 +1663,7 @@ function toggleActiveDomain(domain) {
  */
 function updateDomainUI() {
   const domainBtn = document.querySelector(".domain-btn");
-  if (domainBtn) domainBtn.innerText = getContinent(userConfig.currentDomain).short;
+  if (domainBtn) domainBtn.innerHTML = renderContinentIcon(userConfig.currentDomain, { size: 30, title: t(`summary.${userConfig.currentDomain}`) });
 }
 
 // 세션 도중 일시정지 / 재개 버튼 토글 핸들러 (학습/기록/관전 모드 공통 지원)
@@ -2229,6 +2276,8 @@ async function openRemoteModalPopup(viewName, options = {}) {
           const next = typeBoxes.filter((b) => b.checked).map((b) => b.value);
           if (!next.length) { box.checked = true; return; }
           userConfig.quizTypes = next;
+          saveUserConfig(userConfig);
+          renderDomainSummary();
         });
       });
 
@@ -2312,7 +2361,7 @@ function renderProgressDomainTabs(root) {
     return;
   }
   holder.innerHTML = group.domains.map((d) => `
-    <button type="button" class="progress-domain-tab${d === window.progressViewDomain ? ' active' : ''}" data-domain="${d}">${t(`summary.${d}`)}</button>`).join('');
+    <button type="button" class="progress-domain-tab${d === window.progressViewDomain ? ' active' : ''}" data-domain="${d}">${renderContinentIcon(d, { size: 18 })}${t(`summary.${d}`)}</button>`).join('');
   holder.querySelectorAll('.progress-domain-tab').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
